@@ -26,11 +26,30 @@ public partial class Player : CharacterBody2D
     private bool _wasJumpDown;
     private Vector2 _spawn;
 
+    private AnimatedSprite2D _sprite;
+    private AudioStreamPlayer _jumpSfx;
+    private bool _facingLeft;
+
     public override void _Ready()
     {
         _spawn = Position;
         // 충돌 모양을 코드로 부착 (24x36 사각형)
         AddChild(new CollisionShape2D { Shape = new RectangleShape2D { Size = new Vector2(24, 36) } });
+
+        // 코드로 생성한 스프라이트 + 애니메이션 (idle/run/jump/fall)
+        _sprite = new AnimatedSprite2D
+        {
+            SpriteFrames = SpriteFactory.Build(),
+            TextureFilter = CanvasItem.TextureFilterEnum.Nearest, // 픽셀 또렷하게
+            Scale = new Vector2(2.2f, 2.2f),
+            Position = new Vector2(0, 2),
+        };
+        AddChild(_sprite);
+        _sprite.Play("idle");
+
+        // 점프 효과음(코드 합성)
+        _jumpSfx = new AudioStreamPlayer { Stream = SoundFactory.Jump() };
+        AddChild(_jumpSfx);
     }
 
     public override void _PhysicsProcess(double delta)
@@ -70,6 +89,7 @@ public partial class Player : CharacterBody2D
             v.Y = -JumpForce;
             _jumpBufferTimer = 0f;
             _coyoteTimer = 0f;
+            _jumpSfx.Play(); // 점프 효과음
         }
         // --- 가변 점프 높이: 상승 중 버튼 떼면 위로 가던 속도를 깎음 ---
         if (jumpReleased && v.Y < 0f)
@@ -97,7 +117,7 @@ public partial class Player : CharacterBody2D
         }
 
         UpdateState();
-        QueueRedraw();
+        UpdateAnimation(xInput);
     }
 
     // 속도/접지 상태로 현재 상태 결정
@@ -116,18 +136,21 @@ public partial class Player : CharacterBody2D
         Velocity = Vector2.Zero;
     }
 
-    public override void _Draw()
+    // FSM 상태 → 애니메이션 재생 + 진행 방향으로 좌우 반전
+    private void UpdateAnimation(float xInput)
     {
-        // 상태별 색으로 FSM을 눈으로 확인
-        Color c = CurrentState switch
+        if (xInput < 0f) _facingLeft = true;
+        else if (xInput > 0f) _facingLeft = false;
+        _sprite.FlipH = _facingLeft;
+
+        string anim = CurrentState switch
         {
-            State.Jump => new Color(0.50f, 0.90f, 1.00f),
-            State.Fall => new Color(1.00f, 0.70f, 0.40f),
-            State.Run  => new Color(0.40f, 0.95f, 0.60f),
-            _          => new Color(0.72f, 0.85f, 1.00f),
+            State.Jump => "jump",
+            State.Fall => "fall",
+            State.Run  => "run",
+            _          => "idle",
         };
-        DrawRect(new Rect2(-12, -18, 24, 36), c);
-        DrawCircle(new Vector2(-4, -8), 2.5f, Colors.Black);
-        DrawCircle(new Vector2(5, -8), 2.5f, Colors.Black);
+        if ((string)_sprite.Animation != anim) // 같은 애니면 재시작 안 함
+            _sprite.Play(anim);
     }
 }

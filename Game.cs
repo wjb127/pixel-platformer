@@ -15,12 +15,29 @@ public partial class Game : Node2D
     private Label _coinLabel;
     private Label _msgLabel;
 
+    private AudioStreamPlayer _coinSfx, _stompSfx, _winSfx;
+
     public override void _Ready()
     {
         BuildLevel();
         SetupCamera();
         SetupUI();
+        SetupAudio();
         UpdateUI();
+    }
+
+    private void SetupAudio()
+    {
+        _coinSfx  = AddSfx(SoundFactory.Coin());
+        _stompSfx = AddSfx(SoundFactory.Stomp());
+        _winSfx   = AddSfx(SoundFactory.Win());
+    }
+
+    private AudioStreamPlayer AddSfx(AudioStream stream)
+    {
+        var p = new AudioStreamPlayer { Stream = stream };
+        AddChild(p);
+        return p;
     }
 
     // ===== 레벨 구성 =====
@@ -137,18 +154,21 @@ public partial class Game : Node2D
     private void OnCoinCollected()
     {
         _coinsGot++;
+        _coinSfx.Play();
         UpdateUI();
     }
 
     private void OnEnemyDefeated()
     {
         _kills++;
+        _stompSfx.Play();
         UpdateUI();
     }
 
     private void OnGoalReached()
     {
         _won = true;
+        _winSfx.Play();
         _msgLabel.Text = $"클리어!   코인 {_coinsGot}/{_coinsTotal}  ·  적 {_kills}\nR 키로 다시 시작";
         _msgLabel.Visible = true;
     }
