@@ -17,6 +17,7 @@ public partial class Coin : Area2D
     {
         if (body is Player)
         {
+            Fx.Burst(GetParent(), GlobalPosition, new Color(1f, 0.9f, 0.4f), 8, 100f); // 반짝임
             EmitSignal(SignalName.Collected); // Game이 이 시그널을 듣고 점수 +1
             QueueFree();
         }

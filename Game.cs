@@ -1,20 +1,20 @@
 using Godot;
 using System.Collections.Generic;
 
-// 게임 매니저: 레벨 생성(발판/코인/위험/목표), 카메라, UI, 시그널 연결, 추락/클리어 처리
+// 게임 매니저: 레벨 생성, 카메라(셰이크), UI, 시그널, 추락/클리어, 사운드
 public partial class Game : Node2D
 {
     private Player _player;
-    private readonly List<Rect2> _platforms = new(); // 그리기용으로 발판 사각형 저장
+    private readonly List<Rect2> _platforms = new();
     private int _coinsTotal;
     private int _coinsGot;
     private int _kills;
     private bool _won;
-    private const float DeathY = 560f; // 이 아래로 떨어지면 리스폰(안전망)
+    private const float DeathY = 560f;
 
     private Label _coinLabel;
     private Label _msgLabel;
-
+    private ShakeCamera _cam;
     private AudioStreamPlayer _coinSfx, _stompSfx, _winSfx;
 
     public override void _Ready()
@@ -26,56 +26,42 @@ public partial class Game : Node2D
         UpdateUI();
     }
 
-    private void SetupAudio()
-    {
-        _coinSfx  = AddSfx(SoundFactory.Coin());
-        _stompSfx = AddSfx(SoundFactory.Stomp());
-        _winSfx   = AddSfx(SoundFactory.Win());
-    }
-
-    private AudioStreamPlayer AddSfx(AudioStream stream)
-    {
-        var p = new AudioStreamPlayer { Stream = stream };
-        AddChild(p);
-        return p;
-    }
-
-    // ===== 레벨 구성 =====
+    // ===== 레벨 =====
     private void BuildLevel()
     {
-        // 발판 (x, y, 너비, 높이) — 점프 가능 범위에 맞춰 배치
-        AddPlatform(0, 320, 220, 40);     // 시작 바닥
+        // 기본 발판
+        AddPlatform(0, 320, 220, 40);
         AddPlatform(300, 300, 120, 20);
         AddPlatform(480, 250, 120, 20);
         AddPlatform(660, 300, 120, 20);
-        AddPlatform(840, 320, 280, 40);   // 목표가 있는 바닥
-        AddPlatform(1160, 270, 110, 20);  // 보너스 발판
+        AddPlatform(840, 320, 280, 40);
+        AddPlatform(900, 175, 90, 20);     // 더블점프용 높은 발판
+        AddPlatform(1320, 300, 200, 40);   // 대시용 먼 발판 (넓은 간격)
+        AddPlatform(1500, 150, 24, 190);   // 벽점프/슬라이드 연습용 높은 벽
 
-        // 위험지대(용암): 발판 아래 구덩이를 가로지르는 빨간 띠
-        AddChild(new Hazard
-        {
-            Position = new Vector2(640, 420),
-            RectSize = new Vector2(1400, 40),
-        });
+        // 위험지대(용암)
+        AddChild(new Hazard { Position = new Vector2(640, 430), RectSize = new Vector2(1700, 40) });
 
-        // 플레이어 (스폰 위치)
+        // 플레이어
         _player = new Player { Position = new Vector2(60, 280) };
         AddChild(_player);
 
-        // 코인 (각 발판 위)
+        // 코인
         AddCoin(120, 285);
         AddCoin(360, 265);
         AddCoin(540, 215);
         AddCoin(720, 265);
-        AddCoin(1215, 235);
+        AddCoin(945, 150);   // 더블점프 보너스
+        AddCoin(1190, 245);  // 대시 간격 중간(공중에서 낚아채기)
+        AddCoin(1400, 265);  // 먼 발판
 
-        // 적 (x, y, 순찰 왼쪽경계, 오른쪽경계) — 발판 위를 왔다갔다
-        AddEnemy(360, 285, 305, 415);    // 두 번째 발판 위
-        AddEnemy(950, 300, 850, 1090);   // 목표 바닥 위 (깃발 앞을 지킴)
+        // 적
+        AddEnemy(360, 285, 305, 415);
+        AddEnemy(950, 300, 850, 1090);
 
-        // 목표 깃발
-        var goal = new Goal { Position = new Vector2(1010, 296) };
-        goal.Reached += OnGoalReached;  // 시그널 연결
+        // 목표 (먼 발판 위, 벽 앞)
+        var goal = new Goal { Position = new Vector2(1450, 276) };
+        goal.Reached += OnGoalReached;
         AddChild(goal);
     }
 
@@ -85,13 +71,13 @@ public partial class Game : Node2D
         var body = new StaticBody2D { Position = r.Position + r.Size / 2f };
         body.AddChild(new CollisionShape2D { Shape = new RectangleShape2D { Size = r.Size } });
         AddChild(body);
-        _platforms.Add(r); // _Draw에서 그림
+        _platforms.Add(r);
     }
 
     private void AddCoin(float x, float y)
     {
         var coin = new Coin { Position = new Vector2(x, y) };
-        coin.Collected += OnCoinCollected; // 시그널 연결
+        coin.Collected += OnCoinCollected;
         AddChild(coin);
         _coinsTotal++;
     }
@@ -99,23 +85,20 @@ public partial class Game : Node2D
     private void AddEnemy(float x, float y, float left, float right)
     {
         var enemy = new Enemy { Position = new Vector2(x, y), LeftLimit = left, RightLimit = right };
-        enemy.Defeated += OnEnemyDefeated; // 시그널 연결
+        enemy.Defeated += OnEnemyDefeated;
         AddChild(enemy);
     }
 
-    // ===== 카메라: 플레이어 자식으로 붙이면 자동 추적 =====
+    // ===== 카메라 (흔들림) =====
     private void SetupCamera()
     {
-        var cam = new Camera2D
-        {
-            PositionSmoothingEnabled = true, // 부드럽게 따라옴
-            PositionSmoothingSpeed = 6f,
-        };
-        _player.AddChild(cam);
-        cam.MakeCurrent();
+        _cam = new ShakeCamera { PositionSmoothingEnabled = true, PositionSmoothingSpeed = 6f };
+        _player.AddChild(_cam);
+        _cam.MakeCurrent();
+        _player.Cam = _cam; // 플레이어가 대시/착지/밟기에서 흔들 수 있게 주입
     }
 
-    // ===== UI: CanvasLayer는 화면 고정(카메라 영향 X) =====
+    // ===== UI =====
     private void SetupUI()
     {
         var ui = new CanvasLayer();
@@ -132,8 +115,24 @@ public partial class Game : Node2D
             Visible = false,
         };
         _msgLabel.HorizontalAlignment = HorizontalAlignment.Center;
+        _msgLabel.VerticalAlignment = VerticalAlignment.Center;
         _msgLabel.AddThemeFontSizeOverride("font_size", 28);
         ui.AddChild(_msgLabel);
+    }
+
+    // ===== 오디오 =====
+    private void SetupAudio()
+    {
+        _coinSfx  = AddSfx(SoundFactory.Coin());
+        _stompSfx = AddSfx(SoundFactory.Stomp());
+        _winSfx   = AddSfx(SoundFactory.Win());
+    }
+
+    private AudioStreamPlayer AddSfx(AudioStream stream)
+    {
+        var p = new AudioStreamPlayer { Stream = stream };
+        AddChild(p);
+        return p;
     }
 
     public override void _Process(double delta)
@@ -144,8 +143,6 @@ public partial class Game : Node2D
                 GetTree().ReloadCurrentScene();
             return;
         }
-
-        // 추락 안전망
         if (_player.Position.Y > DeathY)
             _player.Respawn();
     }
@@ -155,6 +152,7 @@ public partial class Game : Node2D
     {
         _coinsGot++;
         _coinSfx.Play();
+        _cam?.Shake(0.08f);
         UpdateUI();
     }
 
@@ -169,21 +167,21 @@ public partial class Game : Node2D
     {
         _won = true;
         _winSfx.Play();
+        _cam?.Shake(0.5f);
         _msgLabel.Text = $"클리어!   코인 {_coinsGot}/{_coinsTotal}  ·  적 {_kills}\nR 키로 다시 시작";
         _msgLabel.Visible = true;
     }
 
     private void UpdateUI() => _coinLabel.Text = $"코인 {_coinsGot}/{_coinsTotal}    적 {_kills}";
 
-    // 발판들을 그림(StaticBody2D는 스스로 안 그리므로 여기서)
     public override void _Draw()
     {
         var top = new Color(0.45f, 0.5f, 0.62f);
         var body = new Color(0.24f, 0.28f, 0.38f);
         foreach (var r in _platforms)
         {
-            DrawRect(r, body);                                   // 몸통
-            DrawRect(new Rect2(r.Position, new Vector2(r.Size.X, 4)), top); // 윗면 하이라이트
+            DrawRect(r, body);
+            DrawRect(new Rect2(r.Position, new Vector2(r.Size.X, 4)), top);
         }
     }
 }

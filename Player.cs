@@ -1,53 +1,63 @@
 using Godot;
 
-// 플레이어: CharacterBody2D 물리 이동 + 점프 손맛(코요테/버퍼/가변높이) + 상태머신
+// 플레이어: 물리 이동 + 점프 손맛 + 더블점프/대시/벽점프 + 주스(스쿼시/파티클/셰이크/히트스톱)
 public partial class Player : CharacterBody2D
 {
-    // ===== 튜닝 값 (여기 숫자만 바꿔도 느낌이 확 달라짐) =====
-    private const float Speed = 200f;      // 최대 이동 속도
-    private const float Accel = 1400f;     // 가속(누를 때)
-    private const float Friction = 1800f;  // 감속(뗄 때)
-    private const float JumpForce = 420f;  // 점프 초기 속도
-    private const float Gravity = 1100f;   // 중력
-    private const float MaxFall = 720f;    // 최대 낙하 속도
+    // 기본 이동
+    private const float Speed = 200f;
+    private const float Accel = 1400f;
+    private const float Friction = 1800f;
+    private const float JumpForce = 420f;
+    private const float Gravity = 1100f;
+    private const float MaxFall = 720f;
 
-    // 손맛 3종
-    private const float CoyoteTime = 0.10f;        // 발판 떠난 직후에도 잠깐 점프 허용
-    private const float JumpBuffer = 0.12f;        // 착지 직전 점프 입력을 기억
-    private const float JumpCut = 0.45f;           // 점프 버튼 일찍 떼면 짧게(가변 높이)
-    private const float BounceForce = 320f;        // 적을 밟았을 때 통통 튕기는 힘
+    // 손맛
+    private const float CoyoteTime = 0.10f;
+    private const float JumpBuffer = 0.12f;
+    private const float JumpCut = 0.45f;
+    private const float BounceForce = 320f;
 
-    // ===== 상태머신 =====
-    public enum State { Idle, Run, Jump, Fall }
+    // 고급 무브먼트
+    private const int MaxJumps = 2;             // 더블 점프
+    private const float DashSpeed = 520f;
+    private const float DashTime = 0.15f;
+    private const float DashCooldown = 0.45f;
+    private const float WallSlideSpeed = 90f;   // 벽 미끄럼 시 최대 낙하속도
+    private const float WallJumpPushX = 260f;
+
+    public enum State { Idle, Run, Jump, Fall, WallSlide, Dash }
     public State CurrentState { get; private set; } = State.Idle;
 
-    private float _coyoteTimer;
-    private float _jumpBufferTimer;
-    private bool _wasJumpDown;
-    private Vector2 _spawn;
+    public ShakeCamera Cam; // Game이 주입
 
+    private float _coyoteTimer, _jumpBufferTimer, _dashTimer, _dashCdTimer;
+    private int _jumpsLeft;
+    private int _dashDir = 1;
+    private bool _wasJumpDown, _wasDashDown, _facingLeft, _wallSliding, _wasOnFloor;
+
+    private Vector2 _spawn, _baseScale;
     private AnimatedSprite2D _sprite;
     private AudioStreamPlayer _jumpSfx;
-    private bool _facingLeft;
+    private Tween _squashTween;
+
+    private static readonly Color Dust = new(0.80f, 0.85f, 0.95f);
 
     public override void _Ready()
     {
         _spawn = Position;
-        // 충돌 모양을 코드로 부착 (24x36 사각형)
         AddChild(new CollisionShape2D { Shape = new RectangleShape2D { Size = new Vector2(24, 36) } });
 
-        // 코드로 생성한 스프라이트 + 애니메이션 (idle/run/jump/fall)
         _sprite = new AnimatedSprite2D
         {
             SpriteFrames = SpriteFactory.Build(),
-            TextureFilter = CanvasItem.TextureFilterEnum.Nearest, // 픽셀 또렷하게
+            TextureFilter = CanvasItem.TextureFilterEnum.Nearest,
             Scale = new Vector2(2.2f, 2.2f),
             Position = new Vector2(0, 2),
         };
+        _baseScale = _sprite.Scale;
         AddChild(_sprite);
         _sprite.Play("idle");
 
-        // 점프 효과음(코드 합성)
         _jumpSfx = new AudioStreamPlayer { Stream = SoundFactory.Jump() };
         AddChild(_jumpSfx);
     }
@@ -57,86 +67,156 @@ public partial class Player : CharacterBody2D
         float dt = (float)delta;
         Vector2 v = Velocity;
 
-        // --- 입력 (간단하게 물리키 폴링. 나중에 Input Map으로 바꾸면 게임패드/리매핑 가능) ---
+        // ---- 입력 (엣지 감지) ----
         float xInput =
             (Input.IsPhysicalKeyPressed(Key.Right) || Input.IsPhysicalKeyPressed(Key.D) ? 1f : 0f) -
             (Input.IsPhysicalKeyPressed(Key.Left)  || Input.IsPhysicalKeyPressed(Key.A) ? 1f : 0f);
-
-        bool jumpDown = Input.IsPhysicalKeyPressed(Key.Space)
-                     || Input.IsPhysicalKeyPressed(Key.W)
-                     || Input.IsPhysicalKeyPressed(Key.Up);
-        bool jumpPressed = jumpDown && !_wasJumpDown;   // 이번 프레임에 막 누름
-        bool jumpReleased = !jumpDown && _wasJumpDown;  // 이번 프레임에 막 뗌
+        bool jumpDown = Input.IsPhysicalKeyPressed(Key.Space) || Input.IsPhysicalKeyPressed(Key.W) || Input.IsPhysicalKeyPressed(Key.Up);
+        bool jumpPressed = jumpDown && !_wasJumpDown;
+        bool jumpReleased = !jumpDown && _wasJumpDown;
         _wasJumpDown = jumpDown;
+        bool dashDown = Input.IsPhysicalKeyPressed(Key.Shift) || Input.IsPhysicalKeyPressed(Key.X);
+        bool dashPressed = dashDown && !_wasDashDown;
+        _wasDashDown = dashDown;
 
-        // --- 좌우 이동 (가속/마찰) ---
-        v.X = xInput != 0f
-            ? Mathf.MoveToward(v.X, xInput * Speed, Accel * dt)
-            : Mathf.MoveToward(v.X, 0f, Friction * dt);
-
-        // --- 중력 ---
-        v.Y = Mathf.Min(v.Y + Gravity * dt, MaxFall);
-
-        // --- 코요테 타임: 바닥에 있으면 타이머 충전, 떨어지면 감소 ---
+        // ---- 타이머 ----
         _coyoteTimer = IsOnFloor() ? CoyoteTime : _coyoteTimer - dt;
-
-        // --- 점프 버퍼: 누른 입력을 잠깐 기억 ---
         _jumpBufferTimer = jumpPressed ? JumpBuffer : _jumpBufferTimer - dt;
+        _dashCdTimer -= dt;
+        if (IsOnFloor()) _jumpsLeft = MaxJumps;
 
-        // --- 실제 점프: 버퍼와 코요테가 둘 다 살아있을 때 ---
-        if (_jumpBufferTimer > 0f && _coyoteTimer > 0f)
+        // ---- 대시 시작 ----
+        if (dashPressed && _dashCdTimer <= 0f && _dashTimer <= 0f)
         {
-            v.Y = -JumpForce;
-            _jumpBufferTimer = 0f;
-            _coyoteTimer = 0f;
-            _jumpSfx.Play(); // 점프 효과음
+            _dashTimer = DashTime;
+            _dashCdTimer = DashCooldown;
+            _dashDir = xInput != 0f ? (int)Mathf.Sign(xInput) : (_facingLeft ? -1 : 1);
+            Cam?.Shake(0.35f);
+            Fx.Burst(GetParent(), GlobalPosition, new Color(0.6f, 0.9f, 1f), 10, 150f, 50f, new Vector2(-_dashDir, 0));
         }
-        // --- 가변 점프 높이: 상승 중 버튼 떼면 위로 가던 속도를 깎음 ---
-        if (jumpReleased && v.Y < 0f)
-            v.Y *= JumpCut;
 
+        bool dashing = _dashTimer > 0f;
+        if (dashing)
+        {
+            _dashTimer -= dt;
+            v = new Vector2(_dashDir * DashSpeed, 0f); // 수평 대시(중력 무시)
+        }
+        else
+        {
+            // 좌우 이동(가속/마찰)
+            v.X = xInput != 0f
+                ? Mathf.MoveToward(v.X, xInput * Speed, Accel * dt)
+                : Mathf.MoveToward(v.X, 0f, Friction * dt);
+
+            // 중력
+            v.Y = Mathf.Min(v.Y + Gravity * dt, MaxFall);
+
+            // 벽 미끄럼
+            bool onWall = IsOnWall() && !IsOnFloor();
+            _wallSliding = onWall && v.Y > 0f && xInput != 0f;
+            if (_wallSliding) v.Y = Mathf.Min(v.Y, WallSlideSpeed);
+
+            // 점프: 벽점프 > 지상/더블점프
+            if (_jumpBufferTimer > 0f)
+            {
+                if (onWall)
+                {
+                    Vector2 n = GetWallNormal();
+                    v.Y = -JumpForce;
+                    v.X = n.X * WallJumpPushX;   // 벽 반대쪽으로 튕김
+                    _jumpBufferTimer = 0f;
+                    _jumpsLeft = MaxJumps - 1;
+                    JumpFx(wall: true);
+                }
+                else if (_coyoteTimer > 0f || _jumpsLeft > 0)
+                {
+                    bool air = _coyoteTimer <= 0f;
+                    v.Y = -JumpForce;
+                    _jumpBufferTimer = 0f;
+                    if (air) _jumpsLeft--;
+                    else { _coyoteTimer = 0f; _jumpsLeft = MaxJumps - 1; }
+                    JumpFx(wall: false, doubleJump: air);
+                }
+            }
+
+            // 가변 점프높이
+            if (jumpReleased && v.Y < 0f) v.Y *= JumpCut;
+        }
+
+        float fallSpeed = v.Y; // 착지 판정용(미끄러짐 전 속도)
         Velocity = v;
-        MoveAndSlide();   // CharacterBody2D가 발판과의 충돌/미끄러짐을 알아서 처리
+        MoveAndSlide();
 
-        // --- 적 밟기 판정: 충돌 '법선'으로 위/옆 구분 (마리오 방식) ---
+        // ---- 적 밟기(충돌 법선) ----
         for (int i = 0; i < GetSlideCollisionCount(); i++)
         {
             var col = GetSlideCollision(i);
             if (col.GetCollider() is Enemy enemy)
             {
-                if (col.GetNormal().Y < -0.5f) // 법선이 위쪽 → 위에서 밟음
-                {
-                    enemy.Die();
-                    Velocity = new Vector2(Velocity.X, -BounceForce); // 통통 튕기기
-                }
-                else // 옆/아래에서 닿음 → 데미지(리스폰)
-                {
-                    Respawn();
-                }
+                if (col.GetNormal().Y < -0.5f) StompEnemy(enemy);
+                else if (!dashing) Respawn(); // 대시 중엔 잠깐 무적
             }
         }
 
-        UpdateState();
+        // ---- 착지 효과 ----
+        bool onFloorNow = IsOnFloor();
+        if (onFloorNow && !_wasOnFloor && fallSpeed > 300f)
+        {
+            Cam?.Shake(0.18f);
+            Squash(new Vector2(1.25f, 0.78f)); // 납작
+            Fx.Burst(GetParent(), GlobalPosition + new Vector2(0, 16), Dust, 8, 70f, 150f, Vector2.Up);
+        }
+        _wasOnFloor = onFloorNow;
+
+        UpdateState(dashing);
         UpdateAnimation(xInput);
     }
 
-    // 속도/접지 상태로 현재 상태 결정
-    private void UpdateState()
+    private void StompEnemy(Enemy enemy)
     {
-        if (!IsOnFloor())
-            CurrentState = Velocity.Y < 0f ? State.Jump : State.Fall;
-        else
-            CurrentState = Mathf.Abs(Velocity.X) > 10f ? State.Run : State.Idle;
+        enemy.Die();
+        Velocity = new Vector2(Velocity.X, -BounceForce);
+        Cam?.Shake(0.4f);
+        Squash(new Vector2(0.8f, 1.25f));
+        Fx.Burst(GetParent(), enemy.GlobalPosition, new Color(1f, 0.5f, 0.6f), 14, 170f);
+        HitStop(0.06f);
     }
 
-    // 추락/위험지대에서 호출
-    public void Respawn()
+    private void JumpFx(bool wall, bool doubleJump = false)
     {
-        Position = _spawn;
-        Velocity = Vector2.Zero;
+        _jumpSfx.Play();
+        Squash(new Vector2(0.78f, 1.25f)); // 길쭉
+        Color c = doubleJump ? new Color(0.7f, 1f, 0.8f) : Dust;
+        Fx.Burst(GetParent(), GlobalPosition + new Vector2(0, 16), c, doubleJump ? 10 : 6, 90f, wall ? 110f : 160f, Vector2.Up);
+        if (doubleJump) Cam?.Shake(0.12f);
     }
 
-    // FSM 상태 → 애니메이션 재생 + 진행 방향으로 좌우 반전
+    // 스쿼시&스트레치: 즉시 변형 후 원래 크기로 탄력있게 복귀
+    private void Squash(Vector2 ratio)
+    {
+        _squashTween?.Kill();
+        _sprite.Scale = _baseScale * ratio;
+        _squashTween = CreateTween();
+        _squashTween.TweenProperty(_sprite, "scale", _baseScale, 0.16f)
+                    .SetTrans(Tween.TransitionType.Back)
+                    .SetEase(Tween.EaseType.Out);
+    }
+
+    // 히트스톱: 잠깐 시간 거의 멈춤 → 타격감. 실시간 타이머로 복구
+    private void HitStop(float seconds)
+    {
+        Engine.TimeScale = 0.05;
+        GetTree().CreateTimer(seconds, true, false, true).Timeout += () => Engine.TimeScale = 1.0;
+    }
+
+    private void UpdateState(bool dashing)
+    {
+        if (dashing) CurrentState = State.Dash;
+        else if (_wallSliding) CurrentState = State.WallSlide;
+        else if (!IsOnFloor()) CurrentState = Velocity.Y < 0f ? State.Jump : State.Fall;
+        else CurrentState = Mathf.Abs(Velocity.X) > 10f ? State.Run : State.Idle;
+    }
+
     private void UpdateAnimation(float xInput)
     {
         if (xInput < 0f) _facingLeft = true;
@@ -145,12 +225,22 @@ public partial class Player : CharacterBody2D
 
         string anim = CurrentState switch
         {
+            State.Dash => "jump",
+            State.WallSlide => "fall",
             State.Jump => "jump",
             State.Fall => "fall",
-            State.Run  => "run",
-            _          => "idle",
+            State.Run => "run",
+            _ => "idle",
         };
-        if ((string)_sprite.Animation != anim) // 같은 애니면 재시작 안 함
+        if ((string)_sprite.Animation != anim)
             _sprite.Play(anim);
+    }
+
+    public void Respawn()
+    {
+        Position = _spawn;
+        Velocity = Vector2.Zero;
+        _dashTimer = 0f;
+        Engine.TimeScale = 1.0; // 히트스톱 중 죽어도 복구
     }
 }
