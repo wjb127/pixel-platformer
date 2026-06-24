@@ -1,0 +1,17 @@
+# Godot 4+
+.godot/
+.import/
+export.cfg
+export_presets.cfg
+*.translation
+
+# .NET / Mono (재생성됨)
+.mono/
+bin/
+obj/
+*.user
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
